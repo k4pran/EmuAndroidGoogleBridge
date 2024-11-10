@@ -48,7 +48,8 @@ import java.security.SecureRandom
 
 class MainActivity : AppCompatActivity() {
     private val TAG = "GoogleDriveActivity"
-    private val WEB_CLIENT_ID = "198250407664-f9qhah3d2jun6o61odlgug7e11cl4pc0.apps.googleusercontent.com"
+    private val WEB_CLIENT_ID =
+        "198250407664-f9qhah3d2jun6o61odlgug7e11cl4pc0.apps.googleusercontent.com"
     val transport = NetHttpTransport()
     val jsonFactory = GsonFactory.getDefaultInstance()
     private var driveService: Drive? = null
@@ -77,7 +78,11 @@ class MainActivity : AppCompatActivity() {
             if (result.resultCode == Activity.RESULT_OK) {
                 val data = result.data
                 val task = GoogleSignIn.getSignedInAccountFromIntent(data)
-                handleSignInResult(task)
+                var googleAccount = handleSignInResult(task)
+                if (googleAccount != null) {
+                    useDriveApi(googleAccount)
+                    listFiles()
+                }
             } else {
                 Log.e(TAG, "Sign-in failed with result code ${result.resultCode}")
             }
@@ -94,6 +99,64 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val googleIdOption: GetGoogleIdOption = createGoogleIdOption();
+
+        val request: GetCredentialRequest = createCredentialRequest(googleIdOption)
+
+        lifecycleScope.launch {
+            try {
+                val result = credentialManager.getCredential(
+                    request = request,
+                    context = this@MainActivity,
+                )
+                Log.i(TAG, "Received getCredential result $result")
+                authenticateGoogleUser(result)
+                authorizeGoogleDrive()
+
+            } catch (e: GetCredentialException) {
+                handleFailure(e)
+            }
+        }
+    }
+
+    fun authenticateGoogleUser(result: GetCredentialResponse) {
+        Log.i(TAG, "Authenticating google user")
+        val credential = result.credential
+        Log.i(TAG, "Signing in with credentials $credential")
+
+        when (credential) {
+
+            // Passkey credential
+            is PublicKeyCredential -> {
+                handlePublicKeyCredential(credential)
+            }
+
+            // Password credential
+            is PasswordCredential -> {
+                handlePasswordCredential(credential)
+            }
+
+            // GoogleIdToken credential
+            is CustomCredential -> {
+                handleCustomCredential(credential)
+            }
+        }
+    }
+
+    private fun authorizeGoogleDrive() {
+        Log.i(TAG, "Authorizing google drive")
+        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestEmail()
+            .requestScopes(Scope(DriveScopes.DRIVE_READONLY))
+            .build()
+
+        val googleSignInClient = GoogleSignIn.getClient(this@MainActivity, gso)
+
+        val signInIntent = googleSignInClient.signInIntent
+        signInLauncher.launch(signInIntent)
+    }
+
+    private fun createGoogleIdOption(): GetGoogleIdOption {
         val googleIdOption: GetGoogleIdOption = GetGoogleIdOption.Builder()
             .setFilterByAuthorizedAccounts(false)
             .setServerClientId(WEB_CLIENT_ID)
@@ -103,120 +166,71 @@ class MainActivity : AppCompatActivity() {
 
         Log.i(TAG, "GoogleIdOption create: $googleIdOption")
 
-        val request: GetCredentialRequest = GetCredentialRequest.Builder()
+        return googleIdOption;
+    }
+
+    private fun createCredentialRequest(googleIdOption: GetGoogleIdOption): GetCredentialRequest {
+        val request = GetCredentialRequest.Builder()
             .addCredentialOption(googleIdOption)
             .build()
 
-        Log.i(TAG, "Credential requested with request $request")
-        Log.i(TAG, "Using package ${application.packageName} and sha ${getSHA1Fingerprint()}")
+        Log.i(TAG, "Credential request created $request")
 
-        lifecycleScope.launch {
+        return request;
+    }
+
+    private fun handlePublicKeyCredential(credential: PublicKeyCredential) {
+        Log.i(TAG, "Using PublicKeyCredential")
+        var responseJson = credential.authenticationResponseJson
+        // TODO
+    }
+
+    private fun handlePasswordCredential(credential: PasswordCredential) {
+        Log.i(TAG, "Using PasswordCredential")
+        val username = credential.id
+        val password = credential.password
+        // TODO
+    }
+
+    private fun handleCustomCredential(credential: CustomCredential) {
+        if (credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
             try {
-                val result = credentialManager.getCredential(
-                    request = request,
-                    context = this@MainActivity,
-                )
-                Log.i(TAG, "Received getCredential result $result")
-                handleSignIn(result)
-            } catch (e: GetCredentialException) {
-                handleFailure(e)
+                val googleIdTokenCredential = GoogleIdTokenCredential
+                    .createFrom(credential.data)
+
+                Log.i(
+                    TAG,
+                    "GoogleIdTokenCredential received for ${googleIdTokenCredential.displayName}"
+                );
+
+                verifyToken(googleIdTokenCredential)
+            } catch (e: GoogleIdTokenParsingException) {
+                Log.e(TAG, "Received an invalid google id token response", e)
             }
+        } else {
+            Log.e(TAG, "Unexpected type of credential")
         }
     }
 
-    fun handleSignIn(result: GetCredentialResponse) {
-        // Handle the successfully returned credential.
-        val credential = result.credential
-        Log.i(TAG, "Signing in with credentials $credential")
+    private fun verifyToken(googleIdTokenCredential: GoogleIdTokenCredential) {
+        val verifier = GoogleIdTokenVerifier.Builder(
+            transport,
+            jsonFactory
+        )
+            .setAudience(listOf(WEB_CLIENT_ID))
+            .build()
 
-        when (credential) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val idToken: GoogleIdToken? =
+                verifier.verify(googleIdTokenCredential.idToken)
+            if (idToken != null) {
+                val payload: IdToken.Payload = idToken.payload
 
-            // Passkey credential
-            is PublicKeyCredential -> {
-                Log.i(TAG, "Using PublicKeyCredential")
-                // Share responseJson such as a GetCredentialResponse on your server to
-                // validate and authenticate
-                var responseJson = credential.authenticationResponseJson
-            }
-
-            // Password credential
-            is PasswordCredential -> {
-                Log.i(TAG, "Using PasswordCredential")
-                // Send ID and password to your server to validate and authenticate.
-                val username = credential.id
-                val password = credential.password
-            }
-
-            // GoogleIdToken credential
-            is CustomCredential -> {
-                if (credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    try {
-                        // Use googleIdTokenCredential and extract the ID to validate and
-                        // authenticate on your server.
-                        val googleIdTokenCredential = GoogleIdTokenCredential
-                            .createFrom(credential.data)
-
-                        Log.i(TAG, "GoogleIdTokenCredential received for ${googleIdTokenCredential.displayName}");
-
-                        val verifier = GoogleIdTokenVerifier.Builder(
-                            transport,
-                            jsonFactory
-                        )
-                            .setAudience(listOf(WEB_CLIENT_ID))
-                            .build()
-//
-                        lifecycleScope.launch(Dispatchers.IO) {
-
-                            val idToken: GoogleIdToken =
-                                verifier.verify(googleIdTokenCredential.idToken)
-                            if (idToken != null) {
-                                val payload: IdToken.Payload = idToken.payload
-
-                                // Print user identifier
-                                val userId: String = payload.getSubject()
-                                Log.i(TAG, "User ID: $userId")
-
-                                // Get profile information from payload
-//                        val email: String = payload.getEmail()
-//                        val emailVerified: Boolean =
-//                            java.lang.Boolean.valueOf(payload.getEmailVerified())
-                                val name = payload.get("name") as? String ?: ""
-                                val pictureUrl = payload.get("picture") as? String ?: ""
-                                val familyName = payload.get("family_name") as? String ?: ""
-                                val givenName = payload.get("given_name") as? String ?: ""
-
-                                Log.i(TAG, "User given name: $givenName")
-                                Log.i(TAG, "User name: $name")
-                                Log.i(TAG, "User picture URL: $pictureUrl")
-                                Log.i(TAG, "User family name: $familyName")
-                            } else {
-                                Log.e(TAG, "Invalid null id token")
-                            }
-                        }
-
-                        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-                            .requestEmail()
-                            .requestScopes(Scope(DriveScopes.DRIVE_READONLY))
-                            .build()
-
-                        val googleSignInClient = GoogleSignIn.getClient(this, gso)
-
-                        val signInIntent = googleSignInClient.signInIntent
-                        signInLauncher.launch(signInIntent)
-
-
-                    } catch (e: GoogleIdTokenParsingException) {
-                        Log.e(TAG, "Received an invalid google id token response", e)
-                    }
-                } else {
-                    // Catch any unrecognized custom credential type here.
-                    Log.e(TAG, "Unexpected type of credential")
-                }
-            }
-
-            else -> {
-                // Catch any unrecognized credential type here.
-                Log.e(TAG, "Unexpected type of credential")
+                val userId: String = payload.getSubject()
+                val name = payload.get("name") as? String ?: ""
+                Log.i(TAG, "User ID: $userId\nName: $name")
+            } else {
+                Log.e(TAG, "Invalid null id token")
             }
         }
     }
@@ -242,7 +256,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun handleSignInResult(completedTask: Task<GoogleSignInAccount>) {
+    private fun handleSignInResult(completedTask: Task<GoogleSignInAccount>): Account? {
         try {
             val account = completedTask.getResult(ApiException::class.java)
             // Signed in successfully
@@ -260,9 +274,6 @@ class MainActivity : AppCompatActivity() {
                     }
                     // Use the access token to access Google Drive
                     Log.i(TAG, "Access Token: $accessToken")
-                    if (googleAccount != null) {
-                        useDriveApi(googleAccount)
-                    }
                 } catch (e: IOException) {
                     Log.e(TAG, "IO Exception: ${e.message}")
                 } catch (e: UserRecoverableAuthException) {
@@ -272,13 +283,16 @@ class MainActivity : AppCompatActivity() {
                     Log.e(TAG, "Google Auth Exception: ${e.message}")
                 }
             }
+            return googleAccount
         } catch (e: ApiException) {
             Log.e(TAG, "Sign-in failed: ${e.statusCode}")
         }
+        return null
     }
 
 
     private fun useDriveApi(account: Account) {
+        Log.i(TAG, "Using google drive API")
         val credential: GoogleAccountCredential = GoogleAccountCredential.usingOAuth2(
             applicationContext, listOf(DriveScopes.DRIVE_FILE)
         )
@@ -291,8 +305,6 @@ class MainActivity : AppCompatActivity() {
         )
             .setApplicationName("Your Application Name")
             .build()
-
-        listFiles()
     }
 
     private fun listFiles() {
@@ -318,10 +330,8 @@ class MainActivity : AppCompatActivity() {
                 val intent = e.intent
                 withContext(Dispatchers.Main) {
                     authorizationLauncher.launch(intent)
-                    listFiles() // TODO remember to stop the recurse
                 }
-            }
-            catch (e: Exception) {
+            } catch (e: Exception) {
                 Log.e(TAG, "Error retrieving files", e)
             }
         }
@@ -336,18 +346,4 @@ class MainActivity : AppCompatActivity() {
             // Handle other exceptions
         }
     }
-
-    fun getSHA1Fingerprint(): String? {
-        try {
-            val info = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
-            val cert = info.signingInfo.apkContentsSigners[0]
-            val md = MessageDigest.getInstance("SHA-1")
-            val sha1 = md.digest(cert.toByteArray())
-            return sha1.joinToString(":") { "%02X".format(it) }
-        } catch (e: Exception) {
-            Log.e("AuthDebug", "Unable to get SHA1 fingerprint", e)
-        }
-        return null
-    }
-
 }
