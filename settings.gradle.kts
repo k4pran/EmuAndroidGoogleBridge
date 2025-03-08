@@ -20,5 +20,6 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "EmuAndroidGoogleBridge"
-include(":app")
- 
+include(":emu-android-storage-bridge")
+include(":app-runner")
+include(":file-picker-plugin")

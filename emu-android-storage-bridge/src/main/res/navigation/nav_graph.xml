@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    app:startDestination="@id/mainFragment">
+
+    <fragment
+        android:id="@+id/mainFragment"
+        android:name="com.emu.emustorebridge.MainFragment"
+        tools:layout="@layout/fragment_main">
+        <action
+            android:id="@+id/action_mainFragment_to_filePickerFragment"
+            app:destination="@id/filePickerFragment" />
+        <action
+            android:id="@+id/action_mainFragment_to_googleDriveFragment"
+            app:destination="@id/googleDriveFragment" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/filePickerFragment"
+        android:name="com.emu.emustorebridge.FilePickerFragment"
+        tools:layout="@layout/fragment_file_picker" />
+
+    <fragment
+        android:id="@+id/googleDriveFragment"
+        android:name="com.emu.emustorebridge.GoogleDriveFragment"
+        tools:layout="@layout/fragment_google_drive" />
+</navigation>
