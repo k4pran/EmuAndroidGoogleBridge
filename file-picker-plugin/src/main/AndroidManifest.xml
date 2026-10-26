@@ -4,12 +4,21 @@
     <uses-permission android:name="android.permission.GET_ACCOUNTS"/>
 
     <application>
-        <activity android:name="com.emu.android.FilePickerActivity"/>
-        <activity android:name="com.emu.android.FileReaderActivity"
-            android:launchMode="singleTask"
-            android:noHistory="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
-
+        <!-- A taskAffinity unlike the app's puts the picker in its own task, which Horizon OS shows
+             as a panel over the immersive activity. In the immersive activity's task it would take
+             the whole task out of VR. -->
+        <activity android:name="com.emu.android.FilePickerOverlayActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.emu.android.filepicker"
+            android:configChanges="density|fontScale|keyboard|keyboardHidden|layoutDirection|locale|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <!-- Horizon OS treats an activity of a VR app as immersive unless it is marked as a panel. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.oculus.intent.category.2D" />
+            </intent-filter>
+        </activity>
     </application>
 
 </manifest>
