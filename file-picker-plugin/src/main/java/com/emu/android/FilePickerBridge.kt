@@ -48,8 +48,10 @@ object FilePickerBridge {
         launcherTaskId = activity.taskId
 
         try {
+            // MULTIPLE_TASK: a fresh task every time. With NEW_TASK alone, a launch made while the
+            // previous overlay's task is still being removed would join that task and go with it.
             val intent = Intent(activity, FilePickerOverlayActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
                 .putExtra(EXTRA_REQUEST_ID, request.id)
             activity.startActivity(intent)
         } catch (e: RuntimeException) {
