@@ -2,8 +2,10 @@ package com.emu.android
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import java.io.File
 import java.io.IOException
@@ -11,13 +13,14 @@ import java.io.InputStream
 import java.util.concurrent.Executors
 
 /**
- * Unity's entry point for importing a PDF through the system document picker, or through the Google
- * Drive app when it is installed.
+ * Unity's entry point for importing PDFs through the system document picker, or through the Google
+ * Drive app when it is installed. The user can pick several PDFs, or, with [launchFolder], a folder
+ * whose PDFs are all imported.
  *
  * On Meta Quest the picker is a 2D panel. It is hosted by [FilePickerOverlayActivity], which runs in
  * its own task, so Horizon OS shows it as an overlay over the immersive Unity activity instead of
- * taking the Unity task out of VR. The picked document is copied into the destination directory
- * before Unity hears about it, so Unity only deals with a plain file path.
+ * taking the Unity task out of VR. Picked documents are copied into the destination directory before
+ * Unity hears about them, so Unity only deals with plain file paths.
  */
 object FilePickerBridge {
     private const val TAG = "EmuFilePicker"
@@ -27,7 +30,10 @@ object FilePickerBridge {
     internal const val EXTRA_SOURCE = "com.emu.android.SOURCE"
 
     /** Where the overlay asks the user to pick from. */
-    internal enum class Source { DEVICE, GOOGLE_DRIVE }
+    internal enum class Source { DEVICE, DEVICE_FOLDER, GOOGLE_DRIVE }
+
+    /** A picked document, opened while the overlay still held the grant to read it. */
+    internal class PickedDocument(val displayName: String, val stream: InputStream?)
 
     private val copyExecutor = Executors.newSingleThreadExecutor()
     private var pendingRequest: Request? = null
@@ -45,6 +51,16 @@ object FilePickerBridge {
     @JvmStatic
     fun launch(activity: Activity, destinationDir: String, callback: FilePickerCallback) {
         launch(activity, destinationDir, callback, Source.DEVICE)
+    }
+
+    /**
+     * Like [launch], but the user picks a folder. Every PDF in it, and in its subfolders, is copied
+     * into the same subfolders of the destination directory. A PDF already copied there by an earlier
+     * import of the folder is not copied again, so picking the folder again brings in only new PDFs.
+     */
+    @JvmStatic
+    fun launchFolder(activity: Activity, destinationDir: String, callback: FilePickerCallback) {
+        launch(activity, destinationDir, callback, Source.DEVICE_FOLDER)
     }
 
     /**
@@ -85,25 +101,58 @@ object FilePickerBridge {
     }
 
     /**
-     * Copies the picked document off the UI thread. The stream must already be open: the read grant
-     * for the document belongs to [FilePickerOverlayActivity] and ends when it finishes, but a stream
-     * opened while it was held stays readable.
+     * Copies the picked documents off the UI thread. Their streams must already be open: the read
+     * grants belong to [FilePickerOverlayActivity] and end when it finishes, but a stream opened while
+     * they were held stays readable. A document whose stream is null could not be opened.
      */
-    internal fun onDocumentPicked(requestId: Int, document: InputStream, displayName: String) {
+    internal fun onDocumentsPicked(requestId: Int, documents: List<PickedDocument>) {
         val request = takeRequest(requestId)
         if (request == null) {
-            document.close()
+            documents.forEach { it.stream?.close() }
+            return
+        }
+
+        copyExecutor.execute {
+            for (document in documents) {
+                importOne(request, document.displayName) {
+                    val stream = document.stream ?: throw IOException("it could not be opened")
+                    stream.use { copyToDirectory(it, document.displayName, request.destinationDir) }
+                }
+            }
+            request.callback.onFinished()
+        }
+    }
+
+    /**
+     * Copies the PDFs in a picked folder off the UI thread. The caller has taken a persistable read
+     * grant on [tree] when [releaseGrant] is true, since walking the folder outlives the overlay; it
+     * is released once the copies are done.
+     */
+    internal fun onFolderPicked(requestId: Int, resolver: ContentResolver, tree: Uri, releaseGrant: Boolean) {
+        val request = takeRequest(requestId)
+        if (request == null) {
+            if (releaseGrant) releaseReadGrant(resolver, tree)
             return
         }
 
         copyExecutor.execute {
             try {
-                val file = document.use { copyToDirectory(it, displayName, request.destinationDir) }
-                Log.i(TAG, "Imported $displayName to $file")
-                request.callback.onFilePicked(file.absolutePath)
+                val pdfs = PickedFolder.findPdfs(resolver, tree)
+                if (pdfs.isEmpty()) {
+                    request.callback.onFailed("There are no PDFs in that folder")
+                    return@execute
+                }
+
+                Log.i(TAG, "Importing ${pdfs.size} PDFs from $tree")
+                for (pdf in pdfs) {
+                    importOne(request, pdf.displayName) { copyFromFolder(resolver, pdf, request.destinationDir) }
+                }
+                request.callback.onFinished()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to import $displayName", e)
-                request.callback.onFailed("Failed to import $displayName: ${e.message}")
+                Log.e(TAG, "Failed to read the folder $tree", e)
+                request.callback.onFailed("The folder could not be read: ${e.message}")
+            } finally {
+                if (releaseGrant) releaseReadGrant(resolver, tree)
             }
         }
     }
@@ -131,6 +180,37 @@ object FilePickerBridge {
         pendingRequest?.takeIf { it.id == requestId }?.also { pendingRequest = null }
     }
 
+    private inline fun importOne(request: Request, displayName: String, copy: () -> File) {
+        try {
+            val file = copy()
+            Log.i(TAG, "Imported $displayName to $file")
+            request.callback.onFilePicked(file.absolutePath)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to import $displayName", e)
+            request.callback.onFileFailed("Failed to import $displayName: ${e.message}")
+        }
+    }
+
+    private fun copyFromFolder(resolver: ContentResolver, pdf: PickedFolder.Pdf, destinationDir: File): File {
+        val directory = pdf.folders.fold(destinationDir) { parent, folder -> File(parent, safeName(folder, "Folder")) }
+        val existing = File(directory, pdfFileName(pdf.displayName))
+        if (existing.isFile && pdf.size != null && existing.length() == pdf.size) {
+            // Copied by an earlier import of this folder.
+            return existing
+        }
+
+        val document = resolver.openInputStream(pdf.uri) ?: throw IOException("it could not be opened")
+        return document.use { copyToDirectory(it, pdf.displayName, directory) }
+    }
+
+    private fun releaseReadGrant(resolver: ContentResolver, tree: Uri) {
+        try {
+            resolver.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Failed to release the read grant on $tree", e)
+        }
+    }
+
     private fun copyToDirectory(document: InputStream, displayName: String, directory: File): File {
         if (!directory.isDirectory && !directory.mkdirs()) {
             throw IOException("Could not create $directory")
@@ -150,12 +230,15 @@ object FilePickerBridge {
     }
 
     private fun pdfFileName(displayName: String): String {
-        val name = displayName.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_").trim().trimStart('.')
-        val base = name.ifEmpty { "Imported book" }
+        val base = safeName(displayName, "Imported book")
         // Always a lower-case extension, which is what Unity looks for when it reloads the library.
         val stem = if (base.endsWith(".pdf", ignoreCase = true)) base.dropLast(".pdf".length) else base
         return "$stem.pdf"
     }
+
+    /** [name] made safe as one file or folder name. Leading dots go, which also rules out "..". */
+    private fun safeName(name: String, fallback: String): String =
+        name.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_").trim().trimStart('.').ifEmpty { fallback }
 
     private fun uniqueFile(directory: File, fileName: String): File {
         val stem = fileName.substring(0, fileName.length - ".pdf".length)
