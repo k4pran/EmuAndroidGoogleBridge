@@ -11,7 +11,8 @@ import java.io.InputStream
 import java.util.concurrent.Executors
 
 /**
- * Unity's entry point for importing a PDF through the system document picker.
+ * Unity's entry point for importing a PDF through the system document picker, or through the Google
+ * Drive app when it is installed.
  *
  * On Meta Quest the picker is a 2D panel. It is hosted by [FilePickerOverlayActivity], which runs in
  * its own task, so Horizon OS shows it as an overlay over the immersive Unity activity instead of
@@ -21,7 +22,12 @@ import java.util.concurrent.Executors
 object FilePickerBridge {
     private const val TAG = "EmuFilePicker"
     private const val COPY_BUFFER_SIZE = 64 * 1024
+    internal const val PDF_MIME_TYPE = "application/pdf"
     internal const val EXTRA_REQUEST_ID = "com.emu.android.REQUEST_ID"
+    internal const val EXTRA_SOURCE = "com.emu.android.SOURCE"
+
+    /** Where the overlay asks the user to pick from. */
+    internal enum class Source { DEVICE, GOOGLE_DRIVE }
 
     private val copyExecutor = Executors.newSingleThreadExecutor()
     private var pendingRequest: Request? = null
@@ -38,6 +44,23 @@ object FilePickerBridge {
 
     @JvmStatic
     fun launch(activity: Activity, destinationDir: String, callback: FilePickerCallback) {
+        launch(activity, destinationDir, callback, Source.DEVICE)
+    }
+
+    /**
+     * Whether [launchGoogleDrive] can pick through the Google Drive app. Without the app, Unity
+     * imports from Drive through the browser instead.
+     */
+    @JvmStatic
+    fun hasGoogleDriveApp(context: Context): Boolean = GoogleDriveApp.isInstalled(context, PDF_MIME_TYPE)
+
+    /** Like [launch], but the user picks from the Google Drive app. */
+    @JvmStatic
+    fun launchGoogleDrive(activity: Activity, destinationDir: String, callback: FilePickerCallback) {
+        launch(activity, destinationDir, callback, Source.GOOGLE_DRIVE)
+    }
+
+    private fun launch(activity: Activity, destinationDir: String, callback: FilePickerCallback, source: Source) {
         val request = synchronized(this) {
             if (pendingRequest != null) {
                 callback.onFailed("The file picker is already open")
@@ -53,6 +76,7 @@ object FilePickerBridge {
             val intent = Intent(activity, FilePickerOverlayActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
                 .putExtra(EXTRA_REQUEST_ID, request.id)
+                .putExtra(EXTRA_SOURCE, source.name)
             activity.startActivity(intent)
         } catch (e: RuntimeException) {
             Log.e(TAG, "Failed to open the file picker", e)
