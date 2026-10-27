@@ -22,6 +22,8 @@ class FilePickerOverlayActivity : Activity() {
         private const val PDF_MIME_TYPE = "application/pdf"
     }
 
+    private val requestId get() = intent.getIntExtra(FilePickerBridge.EXTRA_REQUEST_ID, -1)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (savedInstanceState != null) {
@@ -36,7 +38,7 @@ class FilePickerOverlayActivity : Activity() {
             startActivityForResult(intent, REQUEST_OPEN_DOCUMENT)
         } catch (e: ActivityNotFoundException) {
             Log.e(TAG, "No activity handles ACTION_OPEN_DOCUMENT", e)
-            FilePickerBridge.onPickerFailed("No document picker is available on this device")
+            FilePickerBridge.onPickerFailed(requestId, "No document picker is available on this device")
             close()
         }
     }
@@ -50,7 +52,7 @@ class FilePickerOverlayActivity : Activity() {
         val uri = data?.data
         if (resultCode != RESULT_OK || uri == null) {
             Log.i(TAG, "Document picker cancelled")
-            FilePickerBridge.onPickerCancelled()
+            FilePickerBridge.onPickerCancelled(requestId)
         } else {
             deliver(uri)
         }
@@ -59,9 +61,9 @@ class FilePickerOverlayActivity : Activity() {
 
     override fun onDestroy() {
         // Covers the overlay being torn down before the picker answered. A no-op once a result
-        // has been delivered.
+        // has been delivered, even if a newer launch is already pending.
         if (isFinishing) {
-            FilePickerBridge.onPickerCancelled()
+            FilePickerBridge.onPickerCancelled(requestId)
         }
         super.onDestroy()
     }
@@ -75,10 +77,10 @@ class FilePickerOverlayActivity : Activity() {
         }
 
         if (document == null) {
-            FilePickerBridge.onPickerFailed("The picked document could not be opened")
+            FilePickerBridge.onPickerFailed(requestId, "The picked document could not be opened")
             return
         }
-        FilePickerBridge.onDocumentPicked(document, displayName(uri))
+        FilePickerBridge.onDocumentPicked(requestId, document, displayName(uri))
     }
 
     private fun displayName(uri: Uri): String {

@@ -21,33 +21,40 @@ import java.util.concurrent.Executors
 object FilePickerBridge {
     private const val TAG = "EmuFilePicker"
     private const val COPY_BUFFER_SIZE = 64 * 1024
+    internal const val EXTRA_REQUEST_ID = "com.emu.android.REQUEST_ID"
 
     private val copyExecutor = Executors.newSingleThreadExecutor()
     private var pendingRequest: Request? = null
+    private var lastRequestId = 0
 
-    private class Request(val destinationDir: File, val callback: FilePickerCallback)
+    /**
+     * One launch. Its id travels with the overlay that serves it, so an overlay that is still being
+     * torn down cannot answer, or cancel, a launch that came after it.
+     */
+    private class Request(val id: Int, val destinationDir: File, val callback: FilePickerCallback)
 
     /** The task of the activity that opened the picker, which gets focus back when it closes. */
     private var launcherTaskId = -1
 
     @JvmStatic
     fun launch(activity: Activity, destinationDir: String, callback: FilePickerCallback) {
-        synchronized(this) {
+        val request = synchronized(this) {
             if (pendingRequest != null) {
                 callback.onFailed("The file picker is already open")
                 return
             }
-            pendingRequest = Request(File(destinationDir), callback)
+            Request(++lastRequestId, File(destinationDir), callback).also { pendingRequest = it }
         }
         launcherTaskId = activity.taskId
 
         try {
             val intent = Intent(activity, FilePickerOverlayActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(EXTRA_REQUEST_ID, request.id)
             activity.startActivity(intent)
         } catch (e: RuntimeException) {
             Log.e(TAG, "Failed to open the file picker", e)
-            takeRequest()?.callback?.onFailed("Failed to open the file picker: ${e.message}")
+            takeRequest(request.id)?.callback?.onFailed("Failed to open the file picker: ${e.message}")
         }
     }
 
@@ -56,8 +63,8 @@ object FilePickerBridge {
      * for the document belongs to [FilePickerOverlayActivity] and ends when it finishes, but a stream
      * opened while it was held stays readable.
      */
-    internal fun onDocumentPicked(document: InputStream, displayName: String) {
-        val request = takeRequest()
+    internal fun onDocumentPicked(requestId: Int, document: InputStream, displayName: String) {
+        val request = takeRequest(requestId)
         if (request == null) {
             document.close()
             return
@@ -75,12 +82,12 @@ object FilePickerBridge {
         }
     }
 
-    internal fun onPickerCancelled() {
-        takeRequest()?.callback?.onCancelled()
+    internal fun onPickerCancelled(requestId: Int) {
+        takeRequest(requestId)?.callback?.onCancelled()
     }
 
-    internal fun onPickerFailed(message: String) {
-        takeRequest()?.callback?.onFailed(message)
+    internal fun onPickerFailed(requestId: Int, message: String) {
+        takeRequest(requestId)?.callback?.onFailed(message)
     }
 
     internal fun returnToLauncherTask(context: Context) {
@@ -93,8 +100,9 @@ object FilePickerBridge {
         task.moveToFront()
     }
 
-    private fun takeRequest(): Request? = synchronized(this) {
-        pendingRequest.also { pendingRequest = null }
+    /** Claims the pending request if it is the one [requestId] names. Each request is answered once. */
+    private fun takeRequest(requestId: Int): Request? = synchronized(this) {
+        pendingRequest?.takeIf { it.id == requestId }?.also { pendingRequest = null }
     }
 
     private fun copyToDirectory(document: InputStream, displayName: String, directory: File): File {
@@ -118,7 +126,9 @@ object FilePickerBridge {
     private fun pdfFileName(displayName: String): String {
         val name = displayName.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001f]"), "_").trim().trimStart('.')
         val base = name.ifEmpty { "Imported book" }
-        return if (base.endsWith(".pdf", ignoreCase = true)) base else "$base.pdf"
+        // Always a lower-case extension, which is what Unity looks for when it reloads the library.
+        val stem = if (base.endsWith(".pdf", ignoreCase = true)) base.dropLast(".pdf".length) else base
+        return "$stem.pdf"
     }
 
     private fun uniqueFile(directory: File, fileName: String): File {
@@ -131,6 +141,4 @@ object FilePickerBridge {
         }
         return candidate
     }
-
-
 }
